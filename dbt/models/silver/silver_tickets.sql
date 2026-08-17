@@ -39,7 +39,7 @@ with ranked as (
 
     select
         *,
-        {{ normalize_priority('priority_raw') }}             as priority_clean,
+        {{ normalize_priority('priority_raw') }} as priority_clean,
         row_number() over (
             partition by ticket_id
             order by event_time desc, cdc_seq desc
@@ -48,7 +48,13 @@ with ranked as (
 
 ),
 
-latest as (select * from ranked where _rn = 1)
+latest as (
+
+    select * from ranked
+    where _rn = 1
+      and {{ normalize_priority('priority_raw') }} is not null
+
+)
 
 select
     ticket_id,
