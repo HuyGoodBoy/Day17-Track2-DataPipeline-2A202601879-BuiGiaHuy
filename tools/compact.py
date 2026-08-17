@@ -60,30 +60,48 @@ DST = DATA / "gold_events_v2"
 def main() -> int:
     con = duckdb.connect()
 
+    # Đếm số hàng nguồn trước
     n_src = len(list(SRC.glob("*.parquet")))
-    print(f"  nguồn : {SRC}  ({n_src:,} file)")
+    row_count = con.execute(f"""
+        select count(*) from read_parquet('{SRC}/*.parquet')
+    """).fetchone()[0]
+    print(f"  nguồn : {SRC}  ({n_src:,} file, {row_count:,} hàng)")
 
-    # TODO(nhiệm vụ 4): hiện thực khung COPY ... TO ... ở phần docstring.
-    #
-    #   con.execute(f"""
-    #       copy (
-    #           select * from read_parquet('{SRC}/*.parquet')
-    #           order by ...
-    #       ) to '{DST}' (
-    #           format parquet,
-    #           partition_by (...),
-    #           overwrite_or_ignore,
-    #           row_group_size ...
-    #       )
-    #   """)
-    #
-    # Sau đó kiểm tra không mất hàng nào:
-    #
-    #   assert <số row dataset cũ> == <số row dataset mới>
+    # Tái cấu trúc:
+    # 1. PARTITION_BY event_date  -> thư mục theo ngày (14 giá trị)
+    #    DuckDB hive_partitioning: thư mục 'event_date=2026-08-03/', v.v.
+    #    Dashboard filter event_date = '2026-08-09' sẽ bỏ qua 13/14 thư mục.
+    # 2. ORDER BY event_date, customer_name, event_time
+    #    -> cùng khách nằm liền nhau; min/max row-group phủ customer_name
+    #    -> cùng ngày cũng nằm gần nhau (do partition)
+    # 3. ROW_GROUP_SIZE giữ mặc định 122.880
+    #    Một ngày có ~9.300 hàng << 122.880, nên 1 ngày ≤ 1 row group
+    #    -> min/max row group = min/max thực của cả ngày
+    #    -> predicate pushdown lọc đúng ngày ở cấp row group luôn
+    con.execute(f"""
+        copy (
+            select *,
+                   strftime(event_time, '%Y-%m-%d') as event_date
+            from read_parquet('{SRC}/*.parquet')
+            order by strftime(event_time, '%Y-%m-%d'), customer_name, event_time
+        ) to '{DST}' (
+            format parquet,
+            partition_by (event_date),
+            overwrite_or_ignore
+        )
+    """)
 
-    print("\n  tools/compact.py chưa được hiện thực — đây là nhiệm vụ 4.")
-    print("  Mở file này, đọc phần KHUNG THỰC HIỆN ở đầu file và điền vào TODO.")
-    print("  Hướng dẫn từng bước: GUIDE.md mục 4.\n")
+    n_dst = len(list(DST.rglob("*.parquet")))
+    row_count_dst = con.execute(f"""
+        select count(*) from read_parquet('{DST}/**/*.parquet')
+    """).fetchone()[0]
+    print(f"  đích : {DST}  ({n_dst:,} file, {row_count_dst:,} hàng)")
+
+    assert row_count == row_count_dst, (
+        f"số hàng không khớp: {row_count} → {row_count_dst}"
+    )
+    print("  ✓ không mất hàng nào")
+    con.close()
     return 0
 
 

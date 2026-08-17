@@ -111,10 +111,29 @@ Không dừng pipeline khi gặp bản ghi lỗi vì: 312 bản ghi lỗi (từ 
 
 | | |
 |---|---|
-| **Bài đã làm** | không làm |
-| **Nguyên nhân** | Không đủ thời gian |
-| **Cách khắc phục** | — |
-| **Bằng chứng** | — |
+| **Bài đã làm** | A + B |
+| **Nguyên nhân** | *(xem chi tiết bên dưới)* |
+| **Cách khắc phục** | *(xem chi tiết bên dưới)* |
+| **Bằng chứng** | *(xem chi tiết bên dưới)* |
+
+### Bài A — Query dashboard chậm
+
+| | |
+|---|---|
+| **Triệu chứng** | Dashboard mất 2.568 ms (5.000.000 rows scanned) |
+| **Nguyên nhân** | (1) `strftime(event_time, '%Y-%m-%d') = '...'` bọc cột trong function → predicate không sargable, engine không dùng min/max statistics. (2) 5.000 file nhỏ (tổng 15.6 MB) → DuckDB đọc theo lô, mỗi file vài chục hàng tính ~1.000 rows, gây small-file problem. |
+| **Cách khắc phục** | (a) `tools/compact.py`: ghi lại dataset với `PARTITION_BY event_date` (14 thư mục), `ORDER BY event_date, customer_name, event_time` (cùng khách nằm liền nhau). (b) `queries/dashboard.sql`: đổi đường dẫn sang `data/gold_events_v2/**/`, bỏ `strftime()` thay bằng filter `event_date = '2026-08-09'` (sargable). |
+| **Bằng chứng** | trước: 5.000.000 rows scanned · sau: 137.186 (giảm **36.4×**) · files: 5.000 → 14 · hash: `4379e4c5d9f3` không đổi · kết quả: `('ACME', 3500, 3068, 2521.1, 4691, 262, 7764750)` |
+
+### Bài B — Consumer gặp sự cố giữa batch
+
+| | |
+|---|---|
+| **Triệu chứng** | Consumer chết giữa batch 7/40 → sau restart bị mất 500 hàng |
+| **Nguyên nhân** | Thứ tự hiện tại: `commit()` → `maybe_crash()` → `write_batch()`. Consumer commit offset TRƯỚC khi ghi — ngữ nghĩa **at-most-once**: crash sau commit nhưng trước ghi → offset đã nhảy, batch không được ghi, 500 hàng mất. |
+| **Cách khắc phục** | (a) Đổi thứ tự: `write_batch()` → `commit()` → `maybe_crash()` → chuyển sang **at-least-once**. (b) Thêm `UNIQUE` constraint trên `event_id` trong DDL. (c) Đổi `INSERT` thành `INSERT ... ON CONFLICT (event_id) DO NOTHING` — nếu batch được phát lại sau crash, `event_id` trùng sẽ bị bỏ qua thay vì nhân đôi. |
+| **DO UPDATE vs DO NOTHING** | Nếu một message được phát lại với nội dung ĐÃ ĐỔI: `DO UPDATE` sẽ ghi đè trạng thái cũ bằng trạng thái mới — đó là lỗi nghiêm trọng vì event đã xảy ra không thể "sửa lại" được (event là fact, không phải state). `DO NOTHING` giữ nguyên bản ghi đầu tiên, an toàn hơn và đúng với event-sourcing semantics. |
+| **Bằng chứng** | `make crash-test`: A = 20.000 hàng / 20.000 distinct → B. giết ở lô 7 → C. = 20.000 hàng / 20.000 distinct → không mất, không trùng, C=A ✓ |
 
 ---
 
